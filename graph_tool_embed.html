@@ -69,6 +69,57 @@
             padding: 0 5px;
         }
         .info span { display: block; margin-bottom: 2px; line-height: 1.3; }
+
+        /* --- CSS for Custom Modal --- */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.5);
+            display: none; /* Hidden by default */
+            justify-content: center;
+            align-items: center;
+            z-index: 1000; /* Ensure it's on top */
+        }
+        .modal-content {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+            width: 300px;
+            text-align: center;
+        }
+        .modal-content label {
+            display: block;
+            margin-bottom: 10px;
+            font-size: 0.95em;
+        }
+        .modal-content input[type="text"] {
+            width: calc(100% - 22px); /* Full width minus padding/border */
+            padding: 8px 10px;
+            margin-bottom: 15px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        .modal-buttons button {
+            padding: 8px 15px;
+            margin: 0 5px;
+            border-radius: 4px;
+            cursor: pointer;
+            border: none;
+            font-size: 0.9em;
+        }
+        .modal-buttons button.primary {
+            background-color: #007bff;
+            color: white;
+        }
+        .modal-buttons button.secondary {
+            background-color: #6c757d;
+            color: white;
+        }
     </style>
 </head>
 <body>
@@ -93,6 +144,18 @@
         </div>
     </div>
 
+    <!-- --- HTML for Custom Modal --- -->
+    <div id="xValueModal" class="modal-overlay">
+        <div class="modal-content">
+            <label for="modalXInput">Enter x-value for tangent anchor:</label>
+            <input type="text" id="modalXInput" autofocus>
+            <div class="modal-buttons">
+                <button id="modalOkButton" class="primary">OK</button>
+                <button id="modalCancelButton" class="secondary">Cancel</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         const canvas = document.getElementById('graphCanvas');
         const ctx = canvas.getContext('2d');
@@ -103,6 +166,14 @@
         const saveButton = document.getElementById('saveButton');
         const statusMessage = document.getElementById('statusMessage');
         const errorMessage = document.getElementById('errorMessage');
+
+        // Modal elements
+        const modalOverlay = document.getElementById('xValueModal');
+        const modalXInput = document.getElementById('modalXInput');
+        const modalOkButton = document.getElementById('modalOkButton');
+        const modalCancelButton = document.getElementById('modalCancelButton');
+        let resolveXInputPromise = null;
+
 
         let scale = 30;
         let offsetX = 0;
@@ -116,6 +187,42 @@
         let isDraggingTangentControl = false;
         let isPanning = false;
         let lastMouseX, lastMouseY;
+
+        // --- Function to show custom modal and get input ---
+        function getXValueFromModal(currentX = "0") {
+            modalXInput.value = currentX;
+            modalOverlay.style.display = 'flex';
+            modalXInput.focus();
+            modalXInput.select();
+
+            return new Promise((resolve) => {
+                resolveXInputPromise = resolve;
+            });
+        }
+
+        modalOkButton.addEventListener('click', () => {
+            modalOverlay.style.display = 'none';
+            if (resolveXInputPromise) {
+                resolveXInputPromise(modalXInput.value);
+                resolveXInputPromise = null;
+            }
+        });
+
+        modalCancelButton.addEventListener('click', () => {
+            modalOverlay.style.display = 'none';
+            if (resolveXInputPromise) {
+                resolveXInputPromise(null);
+                resolveXInputPromise = null;
+            }
+        });
+
+        modalXInput.addEventListener('keypress', function(event) {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                modalOkButton.click();
+            }
+        });
+
 
         function resizeCanvasAndRedraw() {
             const newWidth = canvas.clientWidth;
@@ -246,21 +353,20 @@
             ctx.strokeStyle = "darkorange"; ctx.stroke();
             ctx.fillStyle = "purple"; ctx.beginPath(); ctx.arc(screenAnchorX, screenAnchorY, 4, 0, Math.PI * 2); ctx.fill();
 
-            // Display coordinates on canvas
             ctx.fillStyle = "black";
-            ctx.font = "12px Arial"; // INCREASED FONT SIZE
+            ctx.font = "12px Arial"; // INCREASED FONT SIZE for tangent coordinates
             ctx.textAlign = "left";
             const coordPrecision = (scale > 50) ? 2 : 1;
             const p1_text = `(${tangentAnchorPoint.x.toFixed(coordPrecision)}, ${tangentAnchorPoint.y.toFixed(coordPrecision)})`;
-            ctx.fillText(p1_text, screenAnchorX + 8, screenAnchorY - 8); // Adjusted offsets
+            ctx.fillText(p1_text, screenAnchorX + 8, screenAnchorY - 8);
             const p2_text = `(${tangentControlPoint.x.toFixed(coordPrecision)}, ${tangentAnchorPoint.y.toFixed(coordPrecision)})`;
-            let p2_text_y_offset = (tangentControlPoint.y > tangentAnchorPoint.y) ? 16 : -8; // Adjusted offsets
-            if (Math.abs(tangentControlPoint.y - tangentAnchorPoint.y) * scale < 16) { // Adjusted threshold
+            let p2_text_y_offset = (tangentControlPoint.y > tangentAnchorPoint.y) ? 16 : -8;
+            if (Math.abs(tangentControlPoint.y - tangentAnchorPoint.y) * scale < 16) {
                 p2_text_y_offset = (screenControlY > screenAnchorY) ? 16 : -8;
             }
-             ctx.fillText(p2_text, screenControlX + 8, screenAnchorY + p2_text_y_offset); // Adjusted offsets
+             ctx.fillText(p2_text, screenControlX + 8, screenAnchorY + p2_text_y_offset);
             const p3_text = `(${tangentControlPoint.x.toFixed(coordPrecision)}, ${tangentControlPoint.y.toFixed(coordPrecision)})`;
-            ctx.fillText(p3_text, screenControlX + 8, screenControlY - 8); // Adjusted offsets
+            ctx.fillText(p3_text, screenControlX + 8, screenControlY - 8);
         }
 
         function redrawAll() {
@@ -295,10 +401,12 @@
             clearTangentData(); redrawAll();
         });
 
-        drawTangentButton.addEventListener('click', () => {
+        drawTangentButton.addEventListener('click', async () => {
             if (!userFunction) { errorMessage.textContent = "Draw a graph first!"; return; }
             clearTangentData(); errorMessage.textContent = "";
-            const inputXStr = prompt("Enter x-value for tangent anchor (or Cancel to click on graph):", tangentAnchorPoint ? tangentAnchorPoint.x.toFixed(2) : "0");
+
+            const inputXStr = await getXValueFromModal(tangentAnchorPoint ? tangentAnchorPoint.x.toFixed(2) : "0");
+
             if (inputXStr !== null) {
                 const inputX = parseFloat(inputXStr);
                 if (!isNaN(inputX)) {
@@ -313,7 +421,7 @@
                         } else { errorMessage.textContent = `f(x) not finite at x=${inputX}. Click on graph.`; }
                     } catch (e) { errorMessage.textContent = `Error evaluating f(${inputX}). Click on graph.`; }
                 } else if (inputXStr.trim() !== "") { errorMessage.textContent = `Invalid x-value. Click on graph.`; }
-                else { statusMessage.textContent = "Input cancelled/empty. Click graph for tangent."; }
+                else { statusMessage.textContent = "Input empty. Click graph for tangent."; }
             } else { statusMessage.textContent = "Input cancelled. Click graph for tangent."; }
             tangentPlacementMode = true;
             if (!errorMessage.textContent) statusMessage.textContent = "Click on graph to place tangent anchor.";
