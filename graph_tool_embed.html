@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Embeddable Graph & Tangent Tool</title>
+    <style>
+        html, body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            font-family: sans-serif;
+            background-color: #f0f0f0;
+            overflow: hidden;
+        }
+        #appContainer {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            padding: 10px;
+            box-sizing: border-box;
+        }
+        .controls {
+            padding: 10px;
+            background-color: #fff;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 10px;
+            flex-shrink: 0;
+        }
+        .controls label { margin-right: 4px; }
+        .controls input[type="text"] {
+            flex-grow: 1; min-width: 120px;
+            padding: 6px 10px; border-radius: 4px; border: 1px solid #ccc;
+        }
+        .controls button {
+            padding: 6px 10px; border-radius: 4px;
+            background-color: #007bff; color: white;
+            cursor: pointer; border: none; font-size: 0.9em;
+        }
+        .controls button:hover { background-color: #0056b3; }
+        .controls button.secondary { background-color: #6c757d; }
+        .controls button.secondary:hover { background-color: #5a6268; }
+
+        #canvasContainer {
+            flex-grow: 1;
+            position: relative;
+            min-height: 200px;
+            background-color: white;
+        }
+        #graphCanvas {
+            border: 1px solid black;
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+        #graphCanvas.crosshair-cursor { cursor: crosshair; }
+        #graphCanvas.move-cursor { cursor: move; }
+
+        .info {
+            font-size: 0.85em; color: #555;
+            text-align: left;
+            flex-shrink: 0;
+            margin-top: 5px;
+            padding: 0 5px;
+        }
+        .info span { display: block; margin-bottom: 2px; line-height: 1.3; }
+    </style>
+</head>
+<body>
+    <div id="appContainer">
+        <div class="controls">
+            <label for="functionInput">f(x)=</label>
+            <input type="text" id="functionInput" value="x^2/20 - x/2" placeholder="e.g., sin(x), 2x">
+            <button id="drawGraphButton">Graph</button>
+            <button id="drawTangentButton">Tangent</button>
+            <button id="resetTangentButton" class="secondary">Reset Tan.</button>
+            <button id="saveButton">Save</button>
+        </div>
+
+        <div id="canvasContainer">
+            <canvas id="graphCanvas"></canvas>
+        </div>
+
+        <div class="info">
+            <span>Scroll: Zoom. Drag: Pan.</span>
+            <span id="statusMessage" style="min-height: 1.1em;"></span>
+            <span id="errorMessage" style="color: red; min-height: 1.1em;"></span>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('graphCanvas');
+        const ctx = canvas.getContext('2d');
+        const functionInput = document.getElementById('functionInput');
+        const drawGraphButton = document.getElementById('drawGraphButton');
+        const drawTangentButton = document.getElementById('drawTangentButton');
+        const resetTangentButton = document.getElementById('resetTangentButton');
+        const saveButton = document.getElementById('saveButton');
+        const statusMessage = document.getElementById('statusMessage');
+        const errorMessage = document.getElementById('errorMessage');
+
+        let scale = 30;
+        let offsetX = 0;
+        let offsetY = 0;
+        let userFunction = null;
+        let functionStringInternal = '';
+
+        let tangentPlacementMode = false;
+        let tangentAnchorPoint = null;
+        let tangentControlPoint = null;
+        let isDraggingTangentControl = false;
+        let isPanning = false;
+        let lastMouseX, lastMouseY;
+
+        function resizeCanvasAndRedraw() {
+            const newWidth = canvas.clientWidth;
+            const newHeight = canvas.clientHeight;
+            if (newWidth === 0 || newHeight === 0) { return false; }
+            let oldGraphCenterX, oldGraphCenterY;
+            if (canvas.width && canvas.height && canvas.width > 0 && canvas.height > 0) {
+                 oldGraphCenterX = toGraphX(canvas.width / 2);
+                 oldGraphCenterY = toGraphY(canvas.height / 2);
+            }
+            canvas.width = newWidth;
+            canvas.height = newHeight;
+            if (oldGraphCenterX !== undefined && oldGraphCenterY !== undefined) {
+                offsetX = canvas.width / 2 - oldGraphCenterX * scale;
+                offsetY = canvas.height / 2 - (-oldGraphCenterY * scale);
+            } else {
+                offsetX = canvas.width / 2;
+                offsetY = canvas.height / 2;
+            }
+            redrawAll();
+            return true;
+        }
+
+        function preprocessMathString(inputStr) {
+            if (!inputStr) return '';
+            let str = inputStr.trim().replace(/X/g, 'x');
+            str = str.replace(/\bln\b/gi, 'log'); str = str.replace(/\^/g, '**');
+            str = str.replace(/\bpi\b/gi, 'Math.PI'); str = str.replace(/\be\b/gi, 'Math.E');
+            const mathFunctions = ['sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'sqrt', 'cbrt', 'pow', 'exp', 'abs', 'log', 'log10', 'log2', 'sign', 'round', 'floor', 'ceil', 'min', 'max'];
+            const funcPattern = new RegExp(`\\b(${mathFunctions.join('|')})(?=\\s*\\()`, 'gi');
+            str = str.replace(funcPattern, (match) => 'Math.' + match.toLowerCase());
+            str = str.replace(/(\d+(?:\.\d+)?)(\s*)(\bx\b)/g, '$1*$3');
+            str = str.replace(/(\d+(?:\.\d+)?)(\s*)(Math\.\w+|\()/g, '$1*$3');
+            str = str.replace(/(\bx\b)(\s*)(Math\.\w+|\()/g, '$1*$3');
+            str = str.replace(/(\))(\s*)(\bx\b|Math\.\w+|\(|\d+(?:\.\d+)?)/g, '$1*$3');
+            return str;
+        }
+
+        function toScreenX(graphX) { return graphX * scale + offsetX; }
+        function toScreenY(graphY) { return -graphY * scale + offsetY; }
+        function toGraphX(screenX) { return (screenX - offsetX) / scale; }
+        function toGraphY(screenY) { return -(screenY - offsetY) / scale; }
+
+        function drawGrid() {
+            if (!canvas.width || !canvas.height) return;
+            ctx.strokeStyle = "#e0e0e0"; ctx.lineWidth = 1;
+            ctx.font = "10px Arial"; ctx.fillStyle = "#333";
+            let unitSize = 1;
+            if (scale < 20) unitSize = 5; if (scale < 8) unitSize = 10;
+            if (scale > 50) unitSize = 0.5; if (scale > 100) unitSize = 0.25;
+            if (scale > 200) unitSize = 0.1;
+
+            const xPrecision = unitSize < 0.11 ? 2 : (unitSize < 1 ? 1 : 0);
+            const yPrecision = unitSize < 0.11 ? 2 : (unitSize < 1 ? 1 : 0);
+
+            const startGraphX = Math.floor(toGraphX(0) / unitSize) * unitSize;
+            const endGraphX = Math.ceil(toGraphX(canvas.width) / unitSize) * unitSize;
+            for (let x = startGraphX; x <= endGraphX; x += unitSize) {
+                const screenX = toScreenX(x);
+                ctx.beginPath(); ctx.moveTo(screenX, 0); ctx.lineTo(screenX, canvas.height); ctx.stroke();
+                if (Math.abs(x) > 1e-9 || Math.abs(x) < 1e-9 && Math.abs(toScreenX(0) - screenX) < 1) {
+                     ctx.fillText(x.toFixed(xPrecision), screenX + 2, offsetY - 2 < 12 ? 12 : offsetY - 2);
+                }
+            }
+            const startGraphY = Math.floor(toGraphY(canvas.height) / unitSize) * unitSize;
+            const endGraphY = Math.ceil(toGraphY(0) / unitSize) * unitSize;
+            for (let y = startGraphY; y <= endGraphY; y += unitSize) {
+                const screenY = toScreenY(y);
+                ctx.beginPath(); ctx.moveTo(0, screenY); ctx.lineTo(canvas.width, screenY); ctx.stroke();
+                 if (Math.abs(y) > 1e-9 || Math.abs(y) < 1e-9 && Math.abs(toScreenY(0) - screenY) < 1) {
+                     if (Math.abs(y) < 1e-9 && offsetX + 2 < 12 && (offsetY > 12 && offsetY < canvas.height -12) && Math.abs(offsetX - toScreenX(0)) > 1 ) continue;
+                    ctx.fillText(y.toFixed(yPrecision), offsetX + 2 < 12 ? 12 : offsetX + 2, screenY - 2);
+                }
+            }
+            ctx.strokeStyle = "#000000"; ctx.lineWidth = 1.5;
+            ctx.beginPath(); ctx.moveTo(0, offsetY); ctx.lineTo(canvas.width, offsetY); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(offsetX, 0); ctx.lineTo(offsetX, canvas.height); ctx.stroke();
+        }
+
+        function drawFunction() {
+            if (!userFunction || !canvas.width || !canvas.height) return;
+            ctx.strokeStyle = "blue"; ctx.lineWidth = 1.5; ctx.beginPath();
+            let firstPoint = true;
+            for (let screenX = 0; screenX < canvas.width; screenX++) {
+                const graphX = toGraphX(screenX);
+                try {
+                    const graphY = userFunction(graphX);
+                    if (isFinite(graphY)) {
+                        const screenY = toScreenY(graphY);
+                        if (firstPoint) { ctx.moveTo(screenX, screenY); firstPoint = false; }
+                        else { ctx.lineTo(screenX, screenY); }
+                    } else { if (!firstPoint) ctx.stroke(); firstPoint = true; }
+                } catch (e) { if (!firstPoint) ctx.stroke(); firstPoint = true; }
+            }
+            if (!firstPoint) ctx.stroke();
+        }
+
+        function drawTangentAndRiseRun() {
+            if (!tangentAnchorPoint || !tangentControlPoint || !canvas.width || !canvas.height) return;
+            const screenAnchorX = toScreenX(tangentAnchorPoint.x);
+            const screenAnchorY = toScreenY(tangentAnchorPoint.y);
+            const screenControlX = toScreenX(tangentControlPoint.x);
+            const screenControlY = toScreenY(tangentControlPoint.y);
+            let dx_graph = tangentControlPoint.x - tangentAnchorPoint.x;
+            let dy_graph = tangentControlPoint.y - tangentAnchorPoint.y;
+            let slope = (Math.abs(dx_graph) < 1e-9) ? Infinity * Math.sign(dy_graph) : dy_graph / dx_graph;
+            if (Math.abs(dx_graph) < 1e-9 && Math.abs(dy_graph) < 1e-9) slope = 0;
+            ctx.strokeStyle = "red"; ctx.lineWidth = 1.5; ctx.beginPath();
+            if (!isFinite(slope) || Math.abs(dx_graph) < 1e-9) {
+                ctx.moveTo(screenAnchorX, 0); ctx.lineTo(screenAnchorX, canvas.height);
+            } else {
+                const x0_graph_limit = toGraphX(0);
+                const y0_graph_limit = slope * (x0_graph_limit - tangentAnchorPoint.x) + tangentAnchorPoint.y;
+                const x1_graph_limit = toGraphX(canvas.width);
+                const y1_graph_limit = slope * (x1_graph_limit - tangentAnchorPoint.x) + tangentAnchorPoint.y;
+                ctx.moveTo(toScreenX(x0_graph_limit), toScreenY(y0_graph_limit));
+                ctx.lineTo(toScreenX(x1_graph_limit), toScreenY(y1_graph_limit));
+            }
+            ctx.stroke();
+            const triangleP1_screen = { x: screenAnchorX, y: screenAnchorY };
+            const triangleP2_screen = { x: screenControlX, y: screenAnchorY };
+            const triangleP3_screen = { x: screenControlX, y: screenControlY };
+            ctx.strokeStyle = "green"; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+            ctx.beginPath(); ctx.moveTo(triangleP1_screen.x, triangleP1_screen.y);
+            ctx.lineTo(triangleP2_screen.x, triangleP2_screen.y); ctx.lineTo(triangleP3_screen.x, triangleP3_screen.y); ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.fillStyle = "orange"; ctx.beginPath(); ctx.arc(screenControlX, screenControlY, 5, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = "darkorange"; ctx.stroke();
+            ctx.fillStyle = "purple"; ctx.beginPath(); ctx.arc(screenAnchorX, screenAnchorY, 4, 0, Math.PI * 2); ctx.fill();
+
+            // Display coordinates on canvas
+            ctx.fillStyle = "black";
+            ctx.font = "12px Arial"; // INCREASED FONT SIZE
+            ctx.textAlign = "left";
+            const coordPrecision = (scale > 50) ? 2 : 1;
+            const p1_text = `(${tangentAnchorPoint.x.toFixed(coordPrecision)}, ${tangentAnchorPoint.y.toFixed(coordPrecision)})`;
+            ctx.fillText(p1_text, screenAnchorX + 8, screenAnchorY - 8); // Adjusted offsets
+            const p2_text = `(${tangentControlPoint.x.toFixed(coordPrecision)}, ${tangentAnchorPoint.y.toFixed(coordPrecision)})`;
+            let p2_text_y_offset = (tangentControlPoint.y > tangentAnchorPoint.y) ? 16 : -8; // Adjusted offsets
+            if (Math.abs(tangentControlPoint.y - tangentAnchorPoint.y) * scale < 16) { // Adjusted threshold
+                p2_text_y_offset = (screenControlY > screenAnchorY) ? 16 : -8;
+            }
+             ctx.fillText(p2_text, screenControlX + 8, screenAnchorY + p2_text_y_offset); // Adjusted offsets
+            const p3_text = `(${tangentControlPoint.x.toFixed(coordPrecision)}, ${tangentControlPoint.y.toFixed(coordPrecision)})`;
+            ctx.fillText(p3_text, screenControlX + 8, screenControlY - 8); // Adjusted offsets
+        }
+
+        function redrawAll() {
+            if (!canvas.width || !canvas.height || canvas.width === 0 || canvas.height === 0) return;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            drawGrid(); drawFunction(); drawTangentAndRiseRun();
+        }
+
+        function clearTangentData() {
+            tangentAnchorPoint = null; tangentControlPoint = null; tangentPlacementMode = false;
+            statusMessage.textContent = "";
+            canvas.classList.remove('crosshair-cursor'); canvas.classList.remove('move-cursor');
+        }
+
+        drawGraphButton.addEventListener('click', () => {
+            const rawFunctionString = functionInput.value;
+            errorMessage.textContent = ""; statusMessage.textContent = "";
+            if (!rawFunctionString.trim()) {
+                errorMessage.textContent = "Please enter a function.";
+                userFunction = null; clearTangentData(); redrawAll(); return;
+            }
+            try {
+                functionStringInternal = preprocessMathString(rawFunctionString);
+                if (!functionStringInternal) throw new Error("Processed function string is empty.");
+                userFunction = new Function('x', 'return ' + functionStringInternal);
+                userFunction(1);
+            } catch (e) {
+                userFunction = null;
+                errorMessage.textContent = "Invalid function: " + e.message;
+                console.error("Function parsing error:", e, "Processed string:", functionStringInternal);
+            }
+            clearTangentData(); redrawAll();
+        });
+
+        drawTangentButton.addEventListener('click', () => {
+            if (!userFunction) { errorMessage.textContent = "Draw a graph first!"; return; }
+            clearTangentData(); errorMessage.textContent = "";
+            const inputXStr = prompt("Enter x-value for tangent anchor (or Cancel to click on graph):", tangentAnchorPoint ? tangentAnchorPoint.x.toFixed(2) : "0");
+            if (inputXStr !== null) {
+                const inputX = parseFloat(inputXStr);
+                if (!isNaN(inputX)) {
+                    try {
+                        const yOnCurve = userFunction(inputX);
+                        if (isFinite(yOnCurve)) {
+                            tangentAnchorPoint = { x: inputX, y: yOnCurve };
+                            tangentControlPoint = { x: inputX + 1, y: yOnCurve };
+                            tangentPlacementMode = false;
+                            statusMessage.textContent = "Adjust tangent by dragging the orange circle.";
+                            redrawAll(); return;
+                        } else { errorMessage.textContent = `f(x) not finite at x=${inputX}. Click on graph.`; }
+                    } catch (e) { errorMessage.textContent = `Error evaluating f(${inputX}). Click on graph.`; }
+                } else if (inputXStr.trim() !== "") { errorMessage.textContent = `Invalid x-value. Click on graph.`; }
+                else { statusMessage.textContent = "Input cancelled/empty. Click graph for tangent."; }
+            } else { statusMessage.textContent = "Input cancelled. Click graph for tangent."; }
+            tangentPlacementMode = true;
+            if (!errorMessage.textContent) statusMessage.textContent = "Click on graph to place tangent anchor.";
+            canvas.classList.add('crosshair-cursor'); redrawAll();
+        });
+
+        resetTangentButton.addEventListener('click', () => {
+            clearTangentData(); errorMessage.textContent = ""; statusMessage.textContent = "";
+            redrawAll();
+        });
+
+        saveButton.addEventListener('click', () => {
+            if (!canvas.width || !canvas.height || canvas.width === 0 || canvas.height === 0) {
+                errorMessage.textContent = "Canvas not ready for saving."; return;
+            }
+            redrawAll();
+            try {
+                const dataURL = canvas.toDataURL('image/png');
+                const link = document.createElement('a');
+                link.download = 'graph_tangent.png'; link.href = dataURL;
+                document.body.appendChild(link); link.click(); document.body.removeChild(link);
+            } catch (e) {
+                errorMessage.textContent = "Error saving image."; console.error("Save error:", e);
+            }
+        });
+
+        canvas.addEventListener('mousedown', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left; const mouseY = e.clientY - rect.top;
+            const graphMouseX = toGraphX(mouseX); errorMessage.textContent = "";
+            if (tangentPlacementMode) {
+                if (!userFunction) return;
+                try {
+                    const yOnCurve = userFunction(graphMouseX);
+                    if (!isFinite(yOnCurve)) { errorMessage.textContent = "Cannot place tangent on discontinuity."; return; }
+                    tangentAnchorPoint = { x: graphMouseX, y: yOnCurve };
+                    tangentControlPoint = { x: graphMouseX + 1, y: yOnCurve };
+                    tangentPlacementMode = false; isDraggingTangentControl = true;
+                    statusMessage.textContent = "Adjust tangent by dragging the orange circle.";
+                    redrawAll();
+                } catch (err) { errorMessage.textContent = "Could not evaluate f(x) at this point."; }
+            } else if (tangentControlPoint) {
+                const screenControlX = toScreenX(tangentControlPoint.x);
+                const screenControlY = toScreenY(tangentControlPoint.y);
+                const distToControl = Math.sqrt((mouseX - screenControlX)**2 + (mouseY - screenControlY)**2);
+                if (distToControl < 12) { isDraggingTangentControl = true; } else { isPanning = true; }
+            } else { isPanning = true; }
+            lastMouseX = mouseX; lastMouseY = mouseY;
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left; const mouseY = e.clientY - rect.top;
+            let currentCursor = 'grab';
+            if (isDraggingTangentControl && tangentControlPoint) {
+                tangentControlPoint.x = toGraphX(mouseX); tangentControlPoint.y = toGraphY(mouseY);
+                redrawAll(); currentCursor = 'grabbing';
+            } else if (isPanning) {
+                const dx = mouseX - lastMouseX; const dy = mouseY - lastMouseY;
+                offsetX += dx; offsetY += dy;
+                lastMouseX = mouseX; lastMouseY = mouseY;
+                redrawAll(); currentCursor = 'grabbing';
+            } else if (tangentPlacementMode) {
+                currentCursor = 'crosshair';
+            } else if (tangentControlPoint) {
+                const screenControlX = toScreenX(tangentControlPoint.x);
+                const screenControlY = toScreenY(tangentControlPoint.y);
+                const distToControl = Math.sqrt((mouseX - screenControlX)**2 + (mouseY - screenControlY)**2);
+                if (distToControl < 12) { currentCursor = 'move'; }
+            }
+            canvas.style.cursor = currentCursor;
+        });
+
+        canvas.addEventListener('mouseup', () => {
+            isDraggingTangentControl = false; isPanning = false;
+            if (canvas.width && canvas.height) {
+                const ev = new MouseEvent('mousemove', { clientX: lastMouseX + canvas.getBoundingClientRect().left, clientY: lastMouseY + canvas.getBoundingClientRect().top });
+                canvas.dispatchEvent(ev);
+            }
+        });
+
+        canvas.addEventListener('mouseleave', () => {
+            if(isPanning || isDraggingTangentControl) {
+                isDraggingTangentControl = false; isPanning = false;
+                canvas.style.cursor = 'grab';
+            }
+        });
+
+        canvas.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            if (!canvas.width || !canvas.height) return;
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left; const mouseY = e.clientY - rect.top;
+            const graphXBeforeZoom = toGraphX(mouseX); const graphYBeforeZoom = toGraphY(mouseY);
+            const scaleFactor = e.deltaY < 0 ? 1.1 : 0.9; scale *= scaleFactor;
+            offsetX = mouseX - graphXBeforeZoom * scale;
+            offsetY = mouseY - (-graphYBeforeZoom * scale);
+            redrawAll();
+        });
+
+        let resizeTimeout;
+        window.addEventListener('resize', () => {
+            clearTimeout(resizeTimeout);
+            resizeTimeout = setTimeout(resizeCanvasAndRedraw, 100);
+        });
+
+        function initializeApp() {
+            if (!resizeCanvasAndRedraw()) {
+                let retries = 0;
+                const maxRetries = 20;
+                const retryInterval = setInterval(() => {
+                    retries++;
+                    if (resizeCanvasAndRedraw() || retries >= maxRetries) {
+                        clearInterval(retryInterval);
+                        if (canvas.width && canvas.height) {
+                            functionInput.value = "x^2/20 - x/2";
+                            drawGraphButton.click();
+                        } else {
+                            errorMessage.textContent = "Error: Canvas could not be initialized.";
+                            console.error("Failed to initialize canvas dimensions after retries.");
+                        }
+                    }
+                }, 100);
+            } else {
+                functionInput.value = "x^2/20 - x/2";
+                drawGraphButton.click();
+            }
+        }
+        document.addEventListener('DOMContentLoaded', initializeApp);
+    </script>
+</body>
+</html>
